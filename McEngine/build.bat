@@ -17,7 +17,7 @@ set CFLAGS=-O3 -Wall -c -fmessage-length=0
 set PFLAGS=-D__GXX_EXPERIMENTAL_CXX0X__ -D__cplusplus=201103L
 
 set LDFLAGS=-s
-set LDLIBS=-logg -lADLMIDI -lmad -lmodplug -lsmpeg -lgme -lvorbis -lopus -lvorbisfile -ldiscord-rpc -lsteam_api -lSDL2_mixer_ext.dll -lSDL2 -ld3dcompiler_47 -ld3d11 -ldxgi -lopenvr_api -llibcurl -llibxinput9_1_0 -llibBulletSoftBody -llibBulletDynamics -llibBulletCollision -llibLinearMath -lfreetype -lopengl32 -lOpenCL -lvulkan-1 -lglew32 -lglu32 -lgdi32 -lbass -lbass_fx -lcomctl32 -lDwmapi -lComdlg32 -lpsapi -lenet -lws2_32 -lwinmm -lpthread -llibjpeg
+set LDLIBS=-logg -lADLMIDI -lmad -lmodplug -lsmpeg -lgme -lvorbis -lopus -lvorbisfile -ldiscord-rpc -lsteam_api -lSDL2_mixer_ext.dll -lSDL2 -ld3dcompiler_47 -ld3d11 -ldxgi -lopenvr_api -llibcurl -llibxinput9_1_0 -llibBulletSoftBody -llibBulletDynamics -llibBulletCollision -llibLinearMath -lfreetype -lopengl32 -lOpenCL -lvulkan-1 -lglew32 -lglu32 -lgdi32 -lbass -lbass_fx -lcomctl32 -lDwmapi -lComdlg32 -lpsapi -lenet -lws2_32 -lwinmm -lpthread -llibjpeg -llibatomic
 
 
 
