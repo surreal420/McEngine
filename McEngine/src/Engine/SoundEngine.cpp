@@ -98,6 +98,39 @@ DWORD CALLBACK OutputWasapiProc(void *buffer, DWORD length, void *user)
 
 #endif
 
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+#include <bassasio.h>
+#include <atomic>
+#include <cstring>
+
+// NOTE: g_wasapiOutputMixer is shared: ASIO output pulls from the same bassmix mixer as WASAPI output
+std::atomic<bool> g_asioResetRequested(false);
+
+DWORD CALLBACK OutputAsioProc(BOOL input, DWORD channel, void *buffer, DWORD length, void *user)
+{
+	if (g_wasapiOutputMixer != 0)
+	{
+		const int c = BASS_ChannelGetData(g_wasapiOutputMixer, buffer, length);
+
+		if (c < 0)
+			return 0;
+
+		return c;
+	}
+
+	return 0;
+}
+
+void CALLBACK AsioNotifyProc(DWORD notify, void *user)
+{
+	// called on the driver thread, e.g. after the user changed the buffer size in the driver's control panel
+	if (notify == BASS_ASIO_NOTIFY_RESET)
+		g_asioResetRequested = true;
+}
+
+#endif
+
 #if defined(MCENGINE_FEATURE_SDL) && defined(MCENGINE_FEATURE_SDL_MIXER)
 
 #include "SDL.h"
@@ -164,6 +197,30 @@ void _WIN_SND_WASAPI_EXCLUSIVE_CHANGE(UString oldValue, UString newValue)
 
 #endif
 
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+void _WIN_SND_ASIO_BUFFER_SIZE_CHANGE(UString oldValue, UString newValue);
+void _WIN_SND_ASIO_CONTROL_PANEL(void);
+
+ConVar win_snd_asio_buffer_size("win_snd_asio_buffer_size", 0.0f, FCVAR_NONE, "ASIO buffer length in seconds (e.g. 0.005 = 5 ms), 0 = driver default/preferred length, clamped to the driver's supported range", _WIN_SND_ASIO_BUFFER_SIZE_CHANGE);
+ConVar win_snd_asio_control_panel("win_snd_asio_control_panel", FCVAR_NONE, "open the control panel of the current ASIO driver", _WIN_SND_ASIO_CONTROL_PANEL);
+
+void _WIN_SND_ASIO_BUFFER_SIZE_CHANGE(UString oldValue, UString newValue)
+{
+	const int oldValueMS = std::round(oldValue.toFloat()*1000.0f);
+	const int newValueMS = std::round(newValue.toFloat()*1000.0f);
+
+	if (oldValueMS != newValueMS && engine->getSound()->isASIO())
+		engine->getSound()->setOutputDeviceForce(engine->getSound()->getOutputDevice()); // force restart
+}
+
+void _WIN_SND_ASIO_CONTROL_PANEL(void)
+{
+	engine->getSound()->openASIOControlPanel();
+}
+
+#endif
+
 
 
 SoundEngine::OUTPUT_DEVICE::DRIVER SoundEngine::getDefaultDriver()
@@ -187,6 +244,9 @@ SoundEngine::SoundEngine()
 	m_outputDeviceChangeCallback = nullptr;
 
 	m_fVolume = 1.0f;
+
+	m_fASIOOutputLatency = 0.0f;
+	m_iASIOBufferLength = 0;
 
 #ifdef MCENGINE_FEATURE_SOUND
 
@@ -428,6 +488,74 @@ void SoundEngine::updateOutputDevices(bool handleOutputDeviceChanges, bool print
 		}
 	}
 
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+	// asio devices are appended after the wasapi devices, prefixed so users can tell them apart in the same list
+	BASS_ASIO_DEVICEINFO asioDeviceInfo;
+	for (int d=0; (BASS_ASIO_GetDeviceInfo(d, &asioDeviceInfo) == true); d++)
+	{
+		if (printInfo)
+			debugLog("SoundEngine: ASIO Device %i = \"%s\", driver = \"%s\"\n", d, asioDeviceInfo.name, asioDeviceInfo.driver);
+
+		// only add new devices
+		bool alreadyKnown = false;
+		for (size_t i=0; i<m_outputDevices.size(); i++)
+		{
+			if (m_outputDevices[i].driver == OUTPUT_DEVICE::DRIVER::ASIO && m_outputDevices[i].id == d)
+			{
+				alreadyKnown = true;
+				break;
+			}
+		}
+		if (alreadyKnown)
+			continue;
+
+		UString originalDeviceName = "[ASIO] ";
+		originalDeviceName.append(asioDeviceInfo.name);
+
+		OUTPUT_DEVICE soundDevice;
+		soundDevice.id = d;
+		soundDevice.name = originalDeviceName;
+		soundDevice.enabled = true;
+		soundDevice.isDefault = false;
+		soundDevice.driver = OUTPUT_DEVICE::DRIVER::ASIO;
+
+		// avoid duplicate names
+		int duplicateNameCounter = 2;
+		while (true)
+		{
+			bool foundDuplicateName = false;
+			for (size_t i=0; i<m_outputDevices.size(); i++)
+			{
+				if (m_outputDevices[i].name == soundDevice.name)
+				{
+					foundDuplicateName = true;
+
+					soundDevice.name = originalDeviceName;
+					soundDevice.name.append(UString::format(" (%i)", duplicateNameCounter));
+
+					duplicateNameCounter++;
+
+					break;
+				}
+			}
+
+			if (!foundDuplicateName)
+				break;
+		}
+
+		m_outputDevices.push_back(soundDevice);
+
+		// sanity
+		if (d > sanityLimit)
+		{
+			debugLog("WARNING: SoundEngine::updateOutputDevices() found too many ASIO devices ...\n");
+			break;
+		}
+	}
+
+#endif
+
 #endif
 }
 
@@ -459,6 +587,18 @@ bool SoundEngine::initializeOutputDevice(int id, OUTPUT_DEVICE::DRIVER driver)
 #ifdef MCENGINE_FEATURE_BASS_WASAPI
 
 	BASS_WASAPI_Free();
+
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+	if (BASS_ASIO_IsStarted())
+		BASS_ASIO_Stop();
+
+	BASS_ASIO_Free(); // harmless if nothing was initialized
+
+	m_fASIOOutputLatency = 0.0f;
+	m_iASIOBufferLength = 0;
+
+#endif
 
 #endif
 
@@ -530,6 +670,13 @@ bool SoundEngine::initializeOutputDevice(int id, OUTPUT_DEVICE::DRIVER driver)
 			return false;
 		}
 	}
+
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+	if (driver == OUTPUT_DEVICE::DRIVER::ASIO)
+		return initializeASIOOutputDevice(id);
+
+#endif
 
 #ifdef MCENGINE_FEATURE_BASS_WASAPI
 
@@ -622,6 +769,138 @@ bool SoundEngine::initializeOutputDevice(int id, OUTPUT_DEVICE::DRIVER driver)
 #endif
 }
 
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+bool SoundEngine::initializeASIOOutputDevice(int id)
+{
+	// NOTE: BASS itself was already initialized with the "no sound" device by initializeOutputDevice(), exactly like the wasapi path
+
+	// BASS_ASIO_THREAD hosts the driver in its own thread, which lets it be freed from any thread and keeps driver windows responsive
+	if (!BASS_ASIO_Init(id, BASS_ASIO_THREAD))
+	{
+		m_bReady = false;
+		engine->showMessageError("Sound Error", UString::format("BASS_ASIO_Init() failed (%i)!", (int)BASS_ASIO_ErrorGetCode()));
+		return false;
+	}
+
+	BASS_ASIO_SetNotify(AsioNotifyProc, NULL);
+
+	// try to run the device at our sample rate, but never fail because of it (the mixer simply gets created at the driver's rate)
+	const double requestedRate = (double)snd_freq.getInt();
+	if (!BASS_ASIO_SetRate(requestedRate))
+		debugLog("SoundEngine: BASS_ASIO_SetRate(%f) failed (%i), keeping driver rate\n", requestedRate, (int)BASS_ASIO_ErrorGetCode());
+
+	const double rate = BASS_ASIO_GetRate();
+
+	BASS_ASIO_INFO asioInfo;
+	memset(&asioInfo, 0, sizeof(asioInfo));
+	if (!BASS_ASIO_GetInfo(&asioInfo) || rate <= 0.0)
+	{
+		m_bReady = false;
+		engine->showMessageError("Sound Error", UString::format("BASS_ASIO_GetInfo() failed (%i)!", (int)BASS_ASIO_ErrorGetCode()));
+		return false;
+	}
+
+	const int numOutputChannels = (asioInfo.outputs >= 2 ? 2 : (int)asioInfo.outputs);
+	if (numOutputChannels < 1)
+	{
+		m_bReady = false;
+		engine->showMessageError("Sound Error", "ASIO device has no output channels!");
+		return false;
+	}
+
+	g_wasapiOutputMixer = BASS_Mixer_StreamCreate((DWORD)rate, numOutputChannels, BASS_SAMPLE_FLOAT | BASS_STREAM_DECODE | BASS_MIXER_NONSTOP);
+	if (g_wasapiOutputMixer == 0)
+	{
+		m_bReady = false;
+		engine->showMessageError("Sound Error", UString::format("BASS_Mixer_StreamCreate() failed (%i)!", BASS_ErrorGetCode()));
+		return false;
+	}
+
+	// output channel 0 (+ joined channel 1 for stereo) is fed by OutputAsioProc with interleaved float samples from the mixer
+	if (!BASS_ASIO_ChannelEnable(FALSE, 0, OutputAsioProc, NULL)
+		|| (numOutputChannels == 2 && !BASS_ASIO_ChannelJoin(FALSE, 1, 0))
+		|| !BASS_ASIO_ChannelSetFormat(FALSE, 0, BASS_ASIO_FORMAT_FLOAT))
+	{
+		m_bReady = false;
+		engine->showMessageError("Sound Error", UString::format("BASS_ASIO_ChannelEnable/Join/SetFormat() failed (%i)!", (int)BASS_ASIO_ErrorGetCode()));
+		return false;
+	}
+
+	// buffer length: 0 = driver preferred, otherwise seconds -> samples, clamped and snapped to what the driver supports
+	DWORD bufferLength = 0;
+	{
+		const float requestedSeconds = win_snd_asio_buffer_size.getFloat();
+		if (requestedSeconds > 0.0f)
+		{
+			DWORD requested = (DWORD)std::round((double)requestedSeconds * rate);
+
+			if (asioInfo.bufmin > 0 && requested < asioInfo.bufmin)
+				requested = asioInfo.bufmin;
+			if (asioInfo.bufmax > 0 && requested > asioInfo.bufmax)
+				requested = asioInfo.bufmax;
+
+			if (asioInfo.bufgran == -1)
+			{
+				// powers of 2 only: round to nearest
+				DWORD pow2 = 1;
+				while (pow2*2 <= requested)
+					pow2 *= 2;
+				requested = ((requested - pow2) < (pow2*2 - requested) ? pow2 : pow2*2);
+				if (asioInfo.bufmax > 0 && requested > asioInfo.bufmax)
+					requested = pow2;
+			}
+			else if (asioInfo.bufgran == 0)
+			{
+				// only the preferred length is available
+				requested = asioInfo.bufpref;
+			}
+			else if (asioInfo.bufgran > 1 && asioInfo.bufmin > 0)
+			{
+				// snap to multiples of the granularity, starting from bufmin
+				const DWORD steps = (requested - asioInfo.bufmin + (DWORD)asioInfo.bufgran/2) / (DWORD)asioInfo.bufgran;
+				requested = asioInfo.bufmin + steps*(DWORD)asioInfo.bufgran;
+				if (asioInfo.bufmax > 0 && requested > asioInfo.bufmax)
+					requested = asioInfo.bufmax;
+			}
+
+			bufferLength = requested;
+		}
+	}
+
+	debugLog("SoundEngine: ASIO driver = \"%s\", rate = %f, outputs = %i, buffer min/max/pref/gran = %i/%i/%i/%i, requested = %i\n", asioInfo.name, rate, (int)asioInfo.outputs, (int)asioInfo.bufmin, (int)asioInfo.bufmax, (int)asioInfo.bufpref, (int)asioInfo.bufgran, (int)bufferLength);
+
+	if (!BASS_ASIO_Start(bufferLength, 0))
+	{
+		m_bReady = false;
+		engine->showMessageError("Sound Error", UString::format("BASS_ASIO_Start() failed (%i)!", (int)BASS_ASIO_ErrorGetCode()));
+		return false;
+	}
+
+	m_iASIOBufferLength = (int)(bufferLength > 0 ? bufferLength : asioInfo.bufpref);
+	m_fASIOOutputLatency = (float)((double)BASS_ASIO_GetLatency(FALSE) / rate);
+
+	debugLog("SoundEngine: ASIO started, buffer = %i samples (%.2f ms), reported output latency = %.2f ms\n", m_iASIOBufferLength, (double)m_iASIOBufferLength / rate * 1000.0, (double)m_fASIOOutputLatency * 1000.0);
+
+	BASS_ASIO_ChannelSetVolume(FALSE, -1, m_fVolume);
+
+	m_bReady = true;
+
+	for (size_t i=0; i<m_outputDevices.size(); i++)
+	{
+		if (m_outputDevices[i].id == id && m_outputDevices[i].driver == OUTPUT_DEVICE::DRIVER::ASIO)
+		{
+			m_sCurrentOutputDevice = m_outputDevices[i].name;
+			break;
+		}
+	}
+	debugLog("SoundEngine: Output Device = \"%s\"\n", m_sCurrentOutputDevice.toUtf8());
+
+	return true;
+}
+
+#endif
+
 SoundEngine::~SoundEngine()
 {
 #ifdef MCENGINE_FEATURE_SOUND
@@ -642,6 +921,20 @@ SoundEngine::~SoundEngine()
 	// and free it
 	if (m_bReady)
 	{
+
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+		// asio drivers are COM objects: release them before the dll unloads
+		if (m_currentOutputDriver == OUTPUT_DEVICE::DRIVER::ASIO)
+		{
+			if (BASS_ASIO_IsStarted())
+				BASS_ASIO_Stop();
+
+			BASS_ASIO_Free();
+		}
+
+#endif
+
 		BASS_Free();
 
 #ifdef MCENGINE_FEATURE_BASS_WASAPI
@@ -674,6 +967,17 @@ void SoundEngine::restart()
 
 void SoundEngine::update()
 {
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+	// the driver asked for a reset (e.g. buffer size changed in its control panel); do it on the main thread
+	if (g_asioResetRequested.exchange(false))
+	{
+		debugLog("SoundEngine: ASIO driver requested a reset, restarting ...\n");
+		restart();
+	}
+
+#endif
+
 	/*
 	if (snd_change_check_interval.getFloat() > 0.0f)
 	{
@@ -1055,6 +1359,14 @@ void SoundEngine::setVolume(float volume)
 
 #ifdef MCENGINE_FEATURE_BASS_WASAPI
 
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+	if (m_currentOutputDriver == OUTPUT_DEVICE::DRIVER::ASIO)
+		BASS_ASIO_ChannelSetVolume(FALSE, -1, m_fVolume); // all output channels
+	else
+
+#endif
+
 	BASS_WASAPI_SetVolume(BASS_WASAPI_CURVE_WINDOWS | (!win_snd_wasapi_exclusive.getBool() && !win_snd_wasapi_shared_volume_affects_device.getBool() ? BASS_WASAPI_VOL_SESSION : 0), m_fVolume);
 
 #endif
@@ -1101,6 +1413,35 @@ std::vector<UString> SoundEngine::getOutputDevices()
 	}
 
 	return outputDevices;
+}
+
+bool SoundEngine::isASIO() const
+{
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+	return (m_bReady && m_currentOutputDriver == OUTPUT_DEVICE::DRIVER::ASIO);
+
+#else
+
+	return false;
+
+#endif
+}
+
+void SoundEngine::openASIOControlPanel()
+{
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+	if (!isASIO())
+	{
+		debugLog("SoundEngine::openASIOControlPanel() no ASIO device is active\n");
+		return;
+	}
+
+	if (!BASS_ASIO_ControlPanel())
+		debugLog("SoundEngine::openASIOControlPanel() BASS_ASIO_ControlPanel() failed (%i)\n", (int)BASS_ASIO_ErrorGetCode());
+
+#endif
 }
 
 

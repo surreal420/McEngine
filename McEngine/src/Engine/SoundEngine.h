@@ -41,6 +41,12 @@ public:
 	inline const UString &getOutputDevice() const {return m_sCurrentOutputDevice;}
 	inline float getVolume() const {return m_fVolume;}
 
+	// asio (always declared; no-ops unless MCENGINE_FEATURE_BASS_ASIO)
+	bool isASIO() const;
+	inline float getASIOOutputLatency() const {return m_fASIOOutputLatency;}	// seconds, driver-reported output latency
+	inline int getASIOBufferLength() const {return m_iASIOBufferLength;}		// samples, effective buffer length
+	void openASIOControlPanel();
+
 	// ILLEGAL:
 #if defined(MCENGINE_FEATURE_SDL) && defined(MCENGINE_FEATURE_SDL_MIXER)
 
@@ -82,6 +88,15 @@ private:
 	int m_iCurrentOutputDevice;
 	OUTPUT_DEVICE::DRIVER m_currentOutputDriver;
 	UString m_sCurrentOutputDevice;
+
+#ifdef MCENGINE_FEATURE_BASS_ASIO
+
+	bool initializeASIOOutputDevice(int id);
+
+#endif
+
+	float m_fASIOOutputLatency;
+	int m_iASIOBufferLength;
 
 	float m_fVolume;
 
