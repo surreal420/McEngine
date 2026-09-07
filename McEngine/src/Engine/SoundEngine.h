@@ -45,6 +45,7 @@ public:
 	bool isASIO() const;
 	inline float getASIOOutputLatency() const {return m_fASIOOutputLatency;}	// seconds, driver-reported output latency
 	inline int getASIOBufferLength() const {return m_iASIOBufferLength;}		// samples, effective buffer length
+	inline double getASIOSampleRate() const {return m_fASIOSampleRate;}		// Hz, device rate while an ASIO device is active (0 otherwise)
 	void openASIOControlPanel();
 
 	// ILLEGAL:
@@ -97,6 +98,7 @@ private:
 
 	float m_fASIOOutputLatency;
 	int m_iASIOBufferLength;
+	double m_fASIOSampleRate;
 
 	float m_fVolume;
 

@@ -202,15 +202,15 @@ void _WIN_SND_WASAPI_EXCLUSIVE_CHANGE(UString oldValue, UString newValue)
 void _WIN_SND_ASIO_BUFFER_SIZE_CHANGE(UString oldValue, UString newValue);
 void _WIN_SND_ASIO_CONTROL_PANEL(void);
 
-ConVar win_snd_asio_buffer_size("win_snd_asio_buffer_size", 0.0f, FCVAR_NONE, "ASIO buffer length in seconds (e.g. 0.005 = 5 ms), 0 = driver default/preferred length, clamped to the driver's supported range", _WIN_SND_ASIO_BUFFER_SIZE_CHANGE);
+ConVar win_snd_asio_buffer_size("win_snd_asio_buffer_size", 0, FCVAR_NONE, "ASIO buffer length in samples (e.g. 128), 0 = driver default/preferred length, clamped/snapped to the driver's supported range", _WIN_SND_ASIO_BUFFER_SIZE_CHANGE);
 ConVar win_snd_asio_control_panel("win_snd_asio_control_panel", FCVAR_NONE, "open the control panel of the current ASIO driver", _WIN_SND_ASIO_CONTROL_PANEL);
 
 void _WIN_SND_ASIO_BUFFER_SIZE_CHANGE(UString oldValue, UString newValue)
 {
-	const int oldValueMS = std::round(oldValue.toFloat()*1000.0f);
-	const int newValueMS = std::round(newValue.toFloat()*1000.0f);
+	const int oldValueSamples = oldValue.toInt();
+	const int newValueSamples = newValue.toInt();
 
-	if (oldValueMS != newValueMS && engine->getSound()->isASIO())
+	if (oldValueSamples != newValueSamples && engine->getSound()->isASIO())
 		engine->getSound()->setOutputDeviceForce(engine->getSound()->getOutputDevice()); // force restart
 }
 
@@ -247,6 +247,7 @@ SoundEngine::SoundEngine()
 
 	m_fASIOOutputLatency = 0.0f;
 	m_iASIOBufferLength = 0;
+	m_fASIOSampleRate = 0.0;
 
 #ifdef MCENGINE_FEATURE_SOUND
 
@@ -597,6 +598,7 @@ bool SoundEngine::initializeOutputDevice(int id, OUTPUT_DEVICE::DRIVER driver)
 
 	m_fASIOOutputLatency = 0.0f;
 	m_iASIOBufferLength = 0;
+	m_fASIOSampleRate = 0.0;
 
 #endif
 
@@ -827,13 +829,13 @@ bool SoundEngine::initializeASIOOutputDevice(int id)
 		return false;
 	}
 
-	// buffer length: 0 = driver preferred, otherwise seconds -> samples, clamped and snapped to what the driver supports
+	// buffer length: 0 = driver preferred, otherwise samples, clamped and snapped to what the driver supports
 	DWORD bufferLength = 0;
 	{
-		const float requestedSeconds = win_snd_asio_buffer_size.getFloat();
-		if (requestedSeconds > 0.0f)
+		const int requestedSamples = win_snd_asio_buffer_size.getInt();
+		if (requestedSamples > 0)
 		{
-			DWORD requested = (DWORD)std::round((double)requestedSeconds * rate);
+			DWORD requested = (DWORD)requestedSamples;
 
 			if (asioInfo.bufmin > 0 && requested < asioInfo.bufmin)
 				requested = asioInfo.bufmin;
@@ -879,6 +881,7 @@ bool SoundEngine::initializeASIOOutputDevice(int id)
 
 	m_iASIOBufferLength = (int)(bufferLength > 0 ? bufferLength : asioInfo.bufpref);
 	m_fASIOOutputLatency = (float)((double)BASS_ASIO_GetLatency(FALSE) / rate);
+	m_fASIOSampleRate = rate;
 
 	debugLog("SoundEngine: ASIO started, buffer = %i samples (%.2f ms), reported output latency = %.2f ms\n", m_iASIOBufferLength, (double)m_iASIOBufferLength / rate * 1000.0, (double)m_fASIOOutputLatency * 1000.0);
 
