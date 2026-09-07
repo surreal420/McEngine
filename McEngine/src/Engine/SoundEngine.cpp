@@ -166,9 +166,21 @@ void _WIN_SND_WASAPI_EXCLUSIVE_CHANGE(UString oldValue, UString newValue)
 
 
 
+SoundEngine::OUTPUT_DEVICE::DRIVER SoundEngine::getDefaultDriver()
+{
+#ifdef MCENGINE_FEATURE_BASS_WASAPI
+	return OUTPUT_DEVICE::DRIVER::WASAPI;
+#else
+	return OUTPUT_DEVICE::DRIVER::BASS;
+#endif
+}
+
 SoundEngine::SoundEngine()
 {
 	m_bReady = false;
+
+	m_iCurrentOutputDevice = -1;
+	m_currentOutputDriver = getDefaultDriver();
 
 	m_fPrevOutputDeviceChangeCheckTime = 0.0f;
 
@@ -229,6 +241,7 @@ SoundEngine::SoundEngine()
 	defaultOutputDevice.name = "Default";
 	defaultOutputDevice.enabled = true;
 	defaultOutputDevice.isDefault = false; // custom -1 can never have default
+	defaultOutputDevice.driver = getDefaultDriver();
 
 	snd_output_device.setValue(defaultOutputDevice.name);
 	m_outputDevices.push_back(defaultOutputDevice);
@@ -243,7 +256,7 @@ SoundEngine::SoundEngine()
 		engine->showInfo("Sound Error", "Couldn't load bassflac.dll plugin");
 	*/
 
-	initializeOutputDevice(defaultOutputDevice.id);
+	initializeOutputDevice(defaultOutputDevice.id, defaultOutputDevice.driver);
 
 	// convar callbacks
 	snd_freq.setCallback( fastdelegate::MakeDelegate(this, &SoundEngine::onFreqChanged) );
@@ -271,11 +284,12 @@ SoundEngine::SoundEngine()
 	defaultOutputDevice.name = "Default";
 	defaultOutputDevice.enabled = true;
 	defaultOutputDevice.isDefault = false; // custom -1 can never have default
+	defaultOutputDevice.driver = getDefaultDriver();
 
 	snd_output_device.setValue(defaultOutputDevice.name);
 	m_outputDevices.push_back(defaultOutputDevice);
 
-	initializeOutputDevice(defaultOutputDevice.id);
+	initializeOutputDevice(defaultOutputDevice.id, defaultOutputDevice.driver);
 
 	// convar callbacks
 	snd_restart.setCallback( fastdelegate::MakeDelegate(this, &SoundEngine::restart) );
@@ -334,6 +348,7 @@ void SoundEngine::updateOutputDevices(bool handleOutputDeviceChanges, bool print
 			soundDevice.name = originalDeviceName;
 			soundDevice.enabled = isEnabled;
 			soundDevice.isDefault = isDefault;
+			soundDevice.driver = getDefaultDriver();
 
 			// avoid duplicate names
 			int duplicateNameCounter = 2;
@@ -416,11 +431,12 @@ void SoundEngine::updateOutputDevices(bool handleOutputDeviceChanges, bool print
 #endif
 }
 
-bool SoundEngine::initializeOutputDevice(int id)
+bool SoundEngine::initializeOutputDevice(int id, OUTPUT_DEVICE::DRIVER driver)
 {
-	debugLog("SoundEngine: initializeOutputDevice( %i, fallback = %i ) ...\n", id, (int)win_snd_fallback_dsound.getBool());
+	debugLog("SoundEngine: initializeOutputDevice( %i, driver = %i, fallback = %i ) ...\n", id, (int)driver, (int)win_snd_fallback_dsound.getBool());
 
 	m_iCurrentOutputDevice = id;
+	m_currentOutputDriver = driver;
 
 #ifdef MCENGINE_FEATURE_SOUND
 
@@ -497,7 +513,7 @@ bool SoundEngine::initializeOutputDevice(int id)
 
 			win_snd_fallback_dsound.setValue(1.0f);
 
-			const bool didFallbackSucceed = initializeOutputDevice(id);
+			const bool didFallbackSucceed = initializeOutputDevice(id, driver);
 
 			if (!didFallbackSucceed)
 			{
@@ -562,7 +578,7 @@ bool SoundEngine::initializeOutputDevice(int id)
 
 	for (size_t i=0; i<m_outputDevices.size(); i++)
 	{
-		if (m_outputDevices[i].id == id)
+		if (m_outputDevices[i].id == id && m_outputDevices[i].driver == driver)
 		{
 			m_sCurrentOutputDevice = m_outputDevices[i].name;
 			break;
@@ -968,12 +984,13 @@ void SoundEngine::setOutputDevice(UString outputDeviceName)
 	{
 		if (m_outputDevices[i].name == outputDeviceName)
 		{
-			if (m_outputDevices[i].id != m_iCurrentOutputDevice)
+			if (m_outputDevices[i].id != m_iCurrentOutputDevice || m_outputDevices[i].driver != m_currentOutputDriver)
 			{
-				int previousOutputDevice = m_iCurrentOutputDevice;
+				const int previousOutputDevice = m_iCurrentOutputDevice;
+				const OUTPUT_DEVICE::DRIVER previousOutputDriver = m_currentOutputDriver;
 
-				if (!initializeOutputDevice(m_outputDevices[i].id))
-					initializeOutputDevice(previousOutputDevice); // if something went wrong, automatically switch back to the previous device
+				if (!initializeOutputDevice(m_outputDevices[i].id, m_outputDevices[i].driver))
+					initializeOutputDevice(previousOutputDevice, previousOutputDriver); // if something went wrong, automatically switch back to the previous device
 			}
 			else
 				debugLog("SoundEngine::setOutputDevice() \"%s\" already is the current device.\n", outputDeviceName.toUtf8());
@@ -986,7 +1003,7 @@ void SoundEngine::setOutputDevice(UString outputDeviceName)
 
 #elif defined(MCENGINE_FEATURE_SDL) && defined(MCENGINE_FEATURE_SDL_MIXER)
 
-	initializeOutputDevice(-1);
+	initializeOutputDevice(-1, OUTPUT_DEVICE::DRIVER::BASS);
 
 #endif
 }
@@ -1001,10 +1018,11 @@ void SoundEngine::setOutputDeviceForce(UString outputDeviceName)
 		{
 			///if (m_outputDevices[i].id != m_iCurrentOutputDevice)
 			{
-				int previousOutputDevice = m_iCurrentOutputDevice;
+				const int previousOutputDevice = m_iCurrentOutputDevice;
+				const OUTPUT_DEVICE::DRIVER previousOutputDriver = m_currentOutputDriver;
 
-				if (!initializeOutputDevice(m_outputDevices[i].id))
-					initializeOutputDevice(previousOutputDevice); // if something went wrong, automatically switch back to the previous device
+				if (!initializeOutputDevice(m_outputDevices[i].id, m_outputDevices[i].driver))
+					initializeOutputDevice(previousOutputDevice, previousOutputDriver); // if something went wrong, automatically switch back to the previous device
 			}
 			///else
 			///	debugLog("SoundEngine::setOutputDevice() \"%s\" already is the current device.\n", outputDeviceName.toUtf8());
@@ -1017,7 +1035,7 @@ void SoundEngine::setOutputDeviceForce(UString outputDeviceName)
 
 #elif defined(MCENGINE_FEATURE_SDL) && defined(MCENGINE_FEATURE_SDL_MIXER)
 
-	initializeOutputDevice(-1);
+	initializeOutputDevice(-1, OUTPUT_DEVICE::DRIVER::BASS);
 
 #endif
 }

@@ -52,14 +52,24 @@ public:
 private:
 	struct OUTPUT_DEVICE
 	{
+		enum class DRIVER
+		{
+			BASS,	// BASS plays directly (default builds, incl. dsound fallback)
+			WASAPI,	// MCENGINE_FEATURE_BASS_WASAPI: mixer -> basswasapi
+			ASIO	// MCENGINE_FEATURE_BASS_ASIO: mixer -> bassasio
+		};
+
 		int id;
 		bool enabled;
 		bool isDefault;
 		UString name;
+		DRIVER driver;
 	};
 
+	static OUTPUT_DEVICE::DRIVER getDefaultDriver();
+
 	void updateOutputDevices(bool handleOutputDeviceChanges, bool printInfo);
-	bool initializeOutputDevice(int id = -1);
+	bool initializeOutputDevice(int id, OUTPUT_DEVICE::DRIVER driver);
 
 	void onFreqChanged(UString oldValue, UString newValue);
 
@@ -70,6 +80,7 @@ private:
 	std::vector<OUTPUT_DEVICE> m_outputDevices;
 
 	int m_iCurrentOutputDevice;
+	OUTPUT_DEVICE::DRIVER m_currentOutputDriver;
 	UString m_sCurrentOutputDevice;
 
 	float m_fVolume;
